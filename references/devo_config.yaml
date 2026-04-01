@@ -1,0 +1,6 @@
+endpoint: "https://apiv2-sasr.devo.com/search/query"
+auth_token: ""
+default_from: "1d"
+default_to: "now"
+timeout_seconds: 60
+row_preview_limit: 10
