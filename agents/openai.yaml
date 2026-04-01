@@ -1,0 +1,7 @@
+interface:
+  display_name: "Calculo SAF"
+  short_description: "Lanza consultas Devo desde YAML"
+  default_prompt: "Usa $calculo-saf para listar o ejecutar consultas Devo del catalogo local por titulo aproximado, resolviendo parametros y fechas."
+
+policy:
+  allow_implicit_invocation: true
