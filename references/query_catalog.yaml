@@ -1,0 +1,327 @@
+version: 1
+queries:
+  - id: "guia-tv"
+    title: "Guía TV"
+    description: "Alarmar cuando hay un porcentaje de clientes que no disponen de la GuiaTV, centrando el problema en el CSL."
+    parameters: []
+    query: |
+      from my.app.miviewtv.estadog2
+      where isnotnull(CSL),
+      not CSL = "null"
+      select ifthenelse(numElemsInEpgTable = 0,deviceID,"0") as NoGuia
+      group every 30m by CSL
+      every 30m
+      select round(hllppcount(NoGuia)) - 1 as NoGuia,
+      round(hllppcount(deviceID)) as Clientes,
+      100*NoGuia/Clientes as Porcentaje_NOGuia
+
+  - id: "audiencias-multicast"
+    title: "Audiencias multicast"
+    description: "Consulta parametrizable para filtrar por canal, dial y minimo de clientes."
+    parameters:
+      - name: "canal_elegido"
+        description: "Canal a filtrar. Dejar vacio para no aplicar filtro."
+        default: ""
+      - name: "dial_elegido"
+        description: "Dial a filtrar. Dejar vacio para no aplicar filtro."
+        default: ""
+      - name: "min_clientes"
+        description: "Minimo de clientes para mostrar resultados."
+        default: "1"
+    query: |
+      from my.app.miviewtv.audienciasmulticast
+      where action != "VALUE_CHANGE", action = "CONNECTION"
+      select "{{canal_elegido}}" as Canal_elegido, "{{dial_elegido}}" as Dial_elegido
+      select Canal_elegido >= "0" ? Canal ->> Canal_elegido ? true : false : true as can_s,
+      Dial_elegido >= "0" ? Dial = Dial_elegido ? true : false : true as dial_s
+      where can_s = true and dial_s = true
+      group every - by Dial, Canal every -
+      select round(hllppcount(deviceID)) as Clientes
+      where Clientes >= (int("{{min_clientes}}") > 0 ? int("{{min_clientes}}") : 1)
+
+  - id: "mini-guia-tv"
+    title: "Mini-Guía TV"
+    description: "Alarmar cuando hay un porcentaje de clientes que no disponen de la miniguia, centrando el problema en el CSL."
+    parameters: []
+    query: |
+      from my.app.miviewtv.estadog2
+      where isnotnull(CSL),
+      not CSL = "null"
+      select ifthenelse(numElemsInPFTable = 0,deviceID,"0") as NoMiniGuia
+      group every 30m by CSL
+      every 30m
+      select round(hllppcount(NoMiniGuia))-1 as NoMiniGuia,
+      round(hllppcount(deviceID)) as Clientes,
+      100*NoMiniGuia/Clientes as Porcentaje_NoMiniguia
+
+  - id: "fallos-arranque-stb"
+    title: "Fallos en arranque de STB"
+    description: "Identificar problemas de arranque del STB asociados al Metadata-IP y agrupar por CSL."
+    parameters: []
+    query: |
+      from my.app.miviewtv.igmpg2
+      where isnotnull(CSL),
+      chanelIp = 239.0.2.30 or chanelIp = 239.0.2.29,
+      nJoins > 25
+      group every 5m by CSL
+      every 5m
+      select hllppcount(deviceID) as Usuarios_Arranque_STB
+
+  - id: "alarma-perdida-canales"
+    title: "ALARMA PERDIDA DE CANALES"
+    description: "Supervisar perdida parcial o total de canales por CSL y modelo de STB."
+    parameters: []
+    query: |
+      from my.app.miviewtv.estadog2
+      where
+      isnotnull(CSL),
+      not CSL = "null"
+      group every 30m by CSL, dmod
+      every 30m
+      select
+      round(avg(numElemsInChannelTable)) as Media_canales_desco,
+      round(hllppcount(deviceID)) as Desco
+
+  - id: "reset-hardreset"
+    title: "RESET (HardReset)"
+    description: "Alarmar cuando se reinician STBs masivamente, agrupando por fabricante, modelo y CSL."
+    parameters: []
+    query: |
+      from my.app.miviewtv.estadog1
+      where uptime<1000, isnotnull(dman), isnotnull(dmod), isnotnull(CSL), not CSL="null"
+      group every 5m by dman,dmod, CSL every 5m
+      select count() as Arranques_STB
+
+  - id: "pvs-drm"
+    title: "PVS-DRM"
+    description: "Alarmar errores con el PVS para adquirir el certificado de Nagra."
+    parameters: []
+    query: |
+      from my.app.miviewtv.estadog1
+      where not drmPvsProvStatus = 200,
+      not ((drmPvsProvStatus = 300 or drmPvsProvStatus = 100) and uptime < 600),
+      isnotnull(drmPvsProvStatus)
+      group every 5m by drmPvsProvStatus
+      every 5m
+      select hllppcount(deviceID) as deviceID
+
+  - id: "app-partner"
+    title: "app_Partner"
+    description: "Alarmar errores al arrancar apps partner integradas en el kernel del STB, como Netflix o Disney."
+    parameters: []
+    query: |
+      from my.app.miviewtv.appg3
+      group every 5m by type, partner, dmod
+      every 5m
+      select hllppcount(deviceID) as deviceID
+
+  - id: "arranque-menu"
+    title: "ARRANQUE_MENU"
+    description: "Detectar fallos al mostrar el menu del STB, diferenciando entre PROTEUS y WOW."
+    parameters: []
+    query: |
+      from my.app.miviewtv.audienciasstartupshutdown
+      where action = "app_action_getPortalMenu",
+      params -> "failed"
+      select ifthenelse(dman = "ARRIS" or dman = "HUMAX", "PROTEUS", "WOW") as mod_STB
+      group every 5m by mod_STB
+      every 5m
+      select hllppcount(deviceID) as Usuarios
+
+  - id: "http-imagenes-iae"
+    title: "HTTP imagenes IAE"
+    description: "Detectar errores de usuarios al cargar caratulas o banners via IAE."
+    parameters: []
+    query: |
+      from my.app.miviewtv.httpg3
+      where not isnull(IP),callURL -> "iae",
+      callURL -> "images"
+      select split(callURL, "/", 9) as Imagen,
+      split(callURL, ":2001", 1) as patch
+      group every 30m by Imagen, errorInfo, dmod, callURL
+      every 30m
+      select round(hllppcount(deviceID)) as Valor
+
+  - id: "mando-vocal-t2v-v2t"
+    title: "MandoVocal_t2v_v2t"
+    description: "Supervisar fallos del mando vocal en conversion voz-texto y texto-voz."
+    parameters: []
+    query: |
+      from my.app.miviewtv.service360g3
+      where service = "kv2t"or
+      service = "kt2v"
+      select int(peek(counters, re("^\\[\"avg_req_do2first_audio_t.*n_resp_total;;([0-9]+)"), 1)) as n_resp_total_t2v,
+      int(peek(counters, re("^\\[\"avg_req_do2first_audio_t.*n_timeouts;;([0-9]+)"), 1)) as n_timeouts_t2v,
+      int(peek(counters, re("^\\[\"avg_req_do2first_audio_t.*n_on_errors;;([0-9]+)"), 1)) as n_on_errors_t2v,
+      int(peek(counters, re("^\\[\"avg_req_do2first_audio_t.*n_hsk_error;;([0-9]+)"), 1)) as n_hsk_error_t2v,
+      int(peek(counters, re("^\\[\"avg_req_do2first_audio_t.*n_trans_init;;([0-9]+)"), 1)) as n_trans_init_t2v,
+      int(peek(counters, re("^\\[\"avg_req_do2first_audio_t.*n_failed_speechs;;([0-9]+)"), 1)) as n_failed_speechs_t2v,
+      ifthenelse((n_trans_init_t2v - n_resp_total_t2v) > 0 or n_timeouts_t2v > 0 or n_on_errors_t2v > 0 or n_hsk_error_t2v > 0 or n_failed_speechs_t2v > 0, 1, 0) as errores_t2v,
+      ifthenelse((n_trans_init_t2v - n_resp_total_t2v) = 0 and n_timeouts_t2v = 0 and n_on_errors_t2v = 0 and n_hsk_error_t2v = 0 and n_failed_speechs_t2v = 0, 1, 0) as aciertos_t2v,
+      ifthenelse((n_trans_init_t2v - n_resp_total_t2v) > 0 or n_timeouts_t2v > 0 or n_on_errors_t2v > 0 or n_hsk_error_t2v > 0 or n_failed_speechs_t2v > 0, deviceID, "null") as usu_errores_t2v
+      select int(peek(counters, re("^\\[\"avg_req_begin2first.*n_resp_end;;([0-9]+)"), 1)) as n_resp_end_v2t,
+      int(peek(counters, re("^\\[\"avg_req_begin2first.*n_timeouts;;([0-9]+)"), 1)) as n_timeouts_v2t,
+      int(peek(counters, re("^\\[\"avg_req_begin2first.*n_on_errors;;([0-9]+)"), 1)) as n_on_errors_v2t,
+      int(peek(counters, re("^\\[\"avg_req_begin2first.*n_on_close;;([0-9]+)"), 1)) as n_on_close_v2t,
+      int(peek(counters, re("^\\[\"avg_req_begin2first.*n_trans_init;;([0-9]+)"), 1)) as n_trans_init_v2t
+
+  - id: "aura-http"
+    title: "Aura HTTP"
+    description: "Alarmar errores HTTP producidos por la plataforma Aura, agrupados por error y URL."
+    parameters: []
+    query: |
+      from my.app.miviewtv.httpg3
+      where callURL -> "//aura"
+      select split(callURL, "?", 0) as url
+      group every 5m by errorInfo, url
+      every 5m
+      select round(hllppcount(deviceID)) as deviceID
+
+  - id: "dns-servfail"
+    title: "DNS SERVERFAIL"
+    description: "Alarmar fallos de resolucion DNS con error SERVFAIL, agrupando por subdominio, CSL e IP del servidor."
+    parameters: []
+    query: |
+      from my.app.miviewtv.service360g3
+      where service = "dnserrors",
+      counters -> "SERVFAIL"
+      select peek(counters, re("([\\w,.\\-\\/]+;[\\d,.]+;SERVFAIL;\\d+)"), 1) as dominio,
+      peek(dominio, re("^[^;]+;([\\d\\.]+)"), 1) as ip_server,
+      peek(dominio, re("([\\w;.-\\/\\-]+);\\d+$"), 1) as subdominio
+      group every 5m by subdominio, CSL, ip_server
+      every 5m
+      select hllppcount(deviceID) as usuarios
+      where not subdominio -> "html5" and not subdominio -> "recortes" and usuarios > 20 or (subdominio -> "html5" or subdominio -> "recortes") and usuarios > 100
+
+  - id: "dns-refused"
+    title: "DNS REFUSED"
+    description: "Alarmar fallos de resolucion DNS con error REFUSED."
+    parameters: []
+    query: |
+      from my.app.miviewtv.service360g3
+      where service = "dnserrors",
+      counters -> "REFUSED"
+      select peek(counters, re("([\\w,.\\-\\/]+;[\\d,.]+;REFUSED;\\d+)"), 1) as dominio,
+      peek(dominio, re("^[^;]+;([\\d\\.]+)"), 1) as ip_server,
+      peek(dominio, re("([\\w;.-\\/\\-]+);\\d+$"), 1) as subdominio
+      group every 5m by subdominio, CSL
+      every 5m
+      select hllppcount(deviceID) as usuarios
+
+  - id: "dns-others"
+    title: "DNS OTHERS"
+    description: "Alarmar fallos DNS clasificados como OTHERS, con umbral especial para conviva."
+    parameters: []
+    query: |
+      from my.app.miviewtv.service360g3
+      where service = "dnserrors",
+      counters -> "OTHERS"
+      select peek(counters, re("([\\w,.\\-\\/]+;[\\d,.]+;OTHERS;\\d+)"), 1) as dominio,
+      peek(dominio, re("^[^;]+;([\\d\\.]+)"), 1) as ip_server,
+      peek(dominio, re("([\\w;.-\\/\\-]+);\\d+$"), 1) as subdominio
+      group every 5m by subdominio, CSL
+      every 5m
+      select hllppcount(deviceID) as usuarios
+      where not subdominio -> "conviva" and usuarios > 200
+      or
+      subdominio -> "conviva" and usuarios > 300
+
+  - id: "dns-nxdomain"
+    title: "DNS NXDOMAIN"
+    description: "Alarmar fallos DNS por dominios no resolubles, excluyendo sync.search.spotxchange.com."
+    parameters: []
+    query: |
+      from my.app.miviewtv.service360g3
+      where service = "dnserrors",
+      counters -> "NXDOMAIN"
+      select peek(counters, re("([\\w,.\\-\\/]+;[\\d,.]+;NXDOMAIN;\\d+)"), 1) as dominio,
+      peek(dominio, re("^[^;]+;([\\d\\.]+)"), 1) as ip_server
+      select peek(dominio, re("([\\w;.-\\/\\-]+);\\d+$"), 1) as subdominio
+      where not dominio ->> "sync.search.spotxchange.com"
+      group every 5m by subdominio, ip_server, CSL
+      every 5m
+      select round(hllppcount(deviceID)) as usuarios
+
+  - id: "multidisp-errores-reproduccion-tvapp"
+    title: "Multidisp_ERRORES_Reproducción_TVApp"
+    description: "Identificar errores de reproduccion en clientes multidispositivo con app TV."
+    parameters: []
+    query: |
+      from my.app.miviewtv.audienciasstartupshutdown
+      where MAC = "null:null:null:null:null:null"
+      select replaceall(peek(params, re("cod_error[\"v,:\\s]+([\\w.\\/:\\s()]+)"), 1)," ","") as error
+      where startswith(action, "PLAY_") or startswith(error, "E_"),
+      isnotnull(error)
+      group every 5m by error
+      every 5m
+      select round(hllppcount(sourceIP)) as num_sourceIP,
+      round(hllppcount(deviceID)) as num_deviceID
+
+  - id: "multidisp-login"
+    title: "Multidisp_Login"
+    description: "Detectar problemas de login en clientes multidispositivo, diferenciando umbral para ANTV_OTT."
+    parameters: []
+    query: |
+      from my.app.miviewtv.audienciasstartupshutdown
+      where MAC = "null:null:null:null:null:null",
+      not dwMode ="ANS_OTT" and
+      not dwMode="ANT_OTT" and
+      not dwMode -> "IPAD_OTT" and
+      not dwMode="IPH_OTT" and
+      not dwMode="CCAST_OTT" and
+      not dwMode="WP_OTT",
+      not dwMode = "STB_IPTV",
+      (params -> "E_Log" or params ->"E_Gen_1")
+      or
+      (action="CK_OPT" and mnemonic = "PROCESO LOGIN" and page = "IDENTIFICATE" and adminCode = "ANONIMO")
+      group every 5m by dwMode
+      select round(hllppcount(sourceIP)) as usuarios
+      where dwMode = "ANTV_OTT" and usuarios > 500
+      or not(dwMode = "ANTV_OTT") and usuarios > 100
+
+  - id: "multidisp-anonimos"
+    title: "Multidisp_ANONIMOS"
+    description: "Detectar clientes no autenticados frente a autenticados por tipo de dispositivo."
+    parameters: []
+    query: |
+      from my.app.miviewtv.audienciasstartupshutdown
+      where MAC = "null:null:null:null:null:null",
+      action="UP" ,mnemonic="Y_MNE"
+      select
+      ifthenelse((deviceID="n" or userProfile="ANONIMO" or deviceID="N"),sourceIP,"null") as Clientes_no_Autentificados,
+      ifthenelse((not (deviceID="n" or userProfile="ANONIMO" or deviceID="N")),sourceIP,"null") as Clientes_autentificados,
+      not dwMode = "ANS_OTT" and not dwMode = "ANT_OTT" and not dwMode -> "IPAD_OTT" and not dwMode = "IPH_OTT" and not dwMode = "CCAST_OTT" and not dwMode = "WP_OTT" ? "TV" : "null" as TV,
+      dwMode = "ANS_OTT" or dwMode = "ANT_OTT" ? "Android_Movil_Tablet" : "null" as Android_Movil_Tablet,
+      dwMode = "IPAD_OTT" or dwMode = "IPH_OTT" ? "Iphone_Movil_Tablet" : "null" as Iphone_Movil_Tablet,
+      dwMode = "CCAST_OTT" ? "CCAST_OTT" : "null" as Ccast_ott,
+      dwMode = "UKN" ? "UKN" : "null" as Ukn,
+      dwMode = "WP_OTT" ? "WP_OTT" : "null" as WP_OTT,
+      replaceall(TV + Android_Movil_Tablet + Iphone_Movil_Tablet + Ccast_ott + Ukn + WP_OTT, "null", "") as dispositivos
+      group every 5m by dispositivos
+      every 5m
+      select
+      round(hllppcount(Clientes_no_Autentificados)-1) as num_Clientes_no_Autentificados
+
+  - id: "multidisp-fallo-alquiler"
+    title: "Multidisp_fallo_alquiler"
+    description: "Identificar fallos generalizados en el alquiler de contenidos para dispositivos app TV."
+    parameters: []
+    query: |
+      from my.app.miviewtv.audienciasstartupshutdown
+      where MAC = "null:null:null:null:null:null",
+      not dwMode ="ANS_OTT" and
+      not dwMode="ANT_OTT" and
+      not dwMode -> "IPAD_OTT" and
+      not dwMode="IPH_OTT" and
+      not dwMode="CCAST_OTT" and
+      not dwMode="WP_OTT",
+      not dwMode = "STB_IPTV",
+      (action = "VIEW" and mnemonic = "PROCESO ALQUILER") or (action="CK_OPT" and mnemonic="PROCESO ALQUILER")
+      select peek(params, re("cod_error[\"v,:\\s]+([\\w.\\/:]+)"), 1) as error,
+      ifthenelse((action="CK_OPT" and mnemonic="PROCESO ALQUILER") , sourceIP,0) as alquiler,
+      ifthenelse((action = "VIEW" and mnemonic = "PROCESO ALQUILER" and not isnull(error) ),sourceIP,0) as fallo_alquiler
+      group every 30m
+      every 30m
+      select
+      hllppcount(alquiler) as alquiler,
+      hllppcount(fallo_alquiler) as fallo_alquiler
